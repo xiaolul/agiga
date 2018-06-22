@@ -1,18 +1,23 @@
 package edu.jhu.agiga;
 
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.Writer;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
+import java.util.zip.GZIPOutputStream;
 
 import edu.jhu.agiga.AgigaConstants.DependencyForm;
 
 /**
  * Command line tools for printing human-readable versions of the XML
  * annotations.
- * 
+ *
  * @author mgormley
- * 
  */
 public class AgigaPrinter {
 
@@ -37,20 +42,21 @@ public class AgigaPrinter {
         // Create usage string
         String usage = "\nusage: java " + AgigaPrinter.class.getName() + " <type> <gzipped input file>"
                 + "\n  where <type> is one of:";
-        String[][] options = new String[][] { 
-                { "words", "Words only, one sentence per line" },
-                { "lemmas", "Lemmas only, one sentence per line" },
-                { "pos", "Part-of-speech tags" }, 
-                { "ner", "Named entity types" },
-                { "basic-deps", "Basic dependency parses in CONNL-X format" },
-                { "col-deps", "Collapsed dependency parses in CONNL-X format" },
-                { "col-ccproc-deps", "Collapsed and propagated dependency parses in CONNL-X format" },
-                { "phrase-structure", "Phrase structure parses" },
-                { "coref", "Coreference resolution as SGML similar to MUC" },
-                { "stanford-deps", "toString() methods of Stanford dependency parse annotations" },
-                { "stanford-phrase-structure", "toString() method of Stanford phrase structure parses" },
-                { "headlines", "Headlines and Datelines" },
-                { "for-testing-only", "**For use in testing this API only**" } };
+        String[][] options = new String[][]{
+                {"words", "Words only, one sentence per line"},
+                {"lemmas", "Lemmas only, one sentence per line"},
+                {"pos", "Part-of-speech tags"},
+                {"ner", "Named entity types"},
+                {"basic-deps", "Basic dependency parses in CONNL-X format"},
+                {"col-deps", "Collapsed dependency parses in CONNL-X format"},
+                {"col-ccproc-deps", "Collapsed and propagated dependency parses in CONNL-X format"},
+                {"phrase-structure", "Phrase structure parses"},
+                {"coref", "Coreference resolution as SGML similar to MUC"},
+                {"stanford-deps", "toString() methods of Stanford dependency parse annotations"},
+                {"stanford-phrase-structure", "toString() method of Stanford phrase structure parses"},
+                {"headlines", "Headlines and Datelines"},
+                {"for-testing-only", "**For use in testing this API only**"},
+                {"trectext", "TREC-format text without anyannotation"}};
         for (String[] pair : options) {
             usage += String.format("\n    %-25s (%s)", pair[0], pair[1]);
         }
@@ -59,12 +65,13 @@ public class AgigaPrinter {
 
         log.info("Testing");
         // Check for correct args
-        if (args.length != 2) {
+        if (args.length < 2) {
             log.severe(usage);
             System.exit(1);
         }
         String type = args[0];
         String inputFile = args[1];
+        String outPutDir = args[2];
 
         // Print
         Writer writer = new PrintWriter(System.out, true);
@@ -94,6 +101,8 @@ public class AgigaPrinter {
             printHeadlineDateline(inputFile, writer);
         } else if (type.equals("for-testing-only")) {
             printForTestingOnly(inputFile, writer);
+        } else if (type.equals("trectext")) {
+            printTRECText(inputFile, outPutDir);
         } else {
             log.severe("Printer type not recognized: " + type);
             log.severe(usage);
@@ -115,6 +124,94 @@ public class AgigaPrinter {
         }
         log.info("Number of docs: " + reader.getNumDocs());
         log.info("Number of sentences: " + reader.getNumSents());
+    }
+
+    private static String checkAvialbility(String content) {
+        if (content == null ||
+                content.trim().equalsIgnoreCase("") ||
+                content.trim().equalsIgnoreCase("null"))
+            return "";
+        else
+            return content.trim();
+    }
+
+    private static void printTRECText(String inputDir, String outputDir) throws IOException {
+        //Create Gzip writer
+        List<File> files =
+                Files.walk(Paths.get(inputDir)).filter(Files::isRegularFile).
+                        map(Path::toFile).collect(Collectors.toList());
+        ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(16);
+        for (File f : files) {
+            //start multi-threading
+            Runnable parser = () -> {
+                FileOutputStream output = null;
+                Writer writer = null;
+                try {
+                    output = new FileOutputStream(outputDir + Paths.get(f.getName()).getFileName());
+                    writer = new OutputStreamWriter(new GZIPOutputStream(output), "UTF-8");
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                if (writer != null) {
+                    //
+                    AgigaPrefs prefs = new AgigaPrefs();
+                    prefs.setAll(false);
+                    prefs.setWord(true);
+                    StreamingDocumentReader reader = new StreamingDocumentReader(f.getAbsolutePath(), prefs);
+                    StringBuilder sb = new StringBuilder();
+                    for (AgigaDocument doc : reader) {
+                        String title = checkAvialbility(doc.getHeadline());
+                        String date = checkAvialbility(doc.getDateline());
+                        String type = checkAvialbility(doc.getType());
+                        sb.append("<DOC>\n").
+                                append("<DOCNO>").
+                                append(doc.getDocId()).
+                                append("</DOCNO>\n").
+                                append("<TITLE>").
+                                append(title).
+                                append("</TITLE>\n").
+                                append("<DATE>").
+                                append(date).
+                                append("</DATE>\n").
+                                append("<TYPE>").
+                                append(type).
+                                append("</TYPE>\n").
+                                append("<TEXT>\n");
+                        for (AgigaSentence sent : doc.getSents()) {
+                            for (AgigaToken token : sent.getTokens()) {
+                                if (token.getWord().equalsIgnoreCase("-LRB-"))
+                                    sb.append("( ");
+                                else if (token.getWord().equalsIgnoreCase("-RRB-"))
+                                    sb.append(") ");
+                                else {
+                                    String currToken = token.getWord();
+                                    currToken = currToken.replaceAll("\\\\/"," ");
+                                    sb.append(currToken).append(" ");
+                                }
+                            }
+                        }
+                        sb.append("\n</TEXT>\n").append("</DOC>\n\n");
+                        try {
+                            writer.write(sb.toString());
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+
+                        sb.setLength(0);
+                    }
+                    try {
+                        writer.close();
+                        output.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+            };
+            //
+            executor.submit(parser);
+        }
+        System.out.println("Maximum threads inside pool " + executor.getMaximumPoolSize());
+        executor.shutdown();
     }
 
     private static void printLemmas(String inputFile, Writer writer) throws IOException {
@@ -260,12 +357,16 @@ public class AgigaPrinter {
         log.info("Parsing XML for file: " + dReader.getFileId());
         for (AgigaDocument doc : dReader) {
             log.info("Parsing doc: id=" + doc.getDocId() + " type=" + doc.getType());
-            if (doc.getHeadline() != null) { System.out.println("HEADLINE: " + doc.getHeadline()); }
-            if (doc.getDateline() != null) { System.out.println("DATELINE: " + doc.getDateline()); }
+            if (doc.getHeadline() != null) {
+                System.out.println("HEADLINE: " + doc.getHeadline());
+            }
+            if (doc.getDateline() != null) {
+                System.out.println("DATELINE: " + doc.getDateline());
+            }
         }
         log.info("Number of docs: " + dReader.getNumDocs());
     }
-    
+
     private static void printForTestingOnly(String inputFile, Writer writer) throws IOException {
         // Read everything
         AgigaPrefs prefs = new AgigaPrefs();
@@ -284,8 +385,12 @@ public class AgigaPrinter {
         log.info("Parsing XML for file: " + dReader.getFileId());
         for (AgigaDocument doc : dReader) {
             log.info("Parsing doc: id=" + doc.getDocId() + " type=" + doc.getType());
-            if (doc.getHeadline() != null) { log.info("Found headline: " + doc.getHeadline()); }
-            if (doc.getDateline() != null) { log.info("Found dateline: " + doc.getDateline()); }
+            if (doc.getHeadline() != null) {
+                log.info("Found headline: " + doc.getHeadline());
+            }
+            if (doc.getDateline() != null) {
+                log.info("Found dateline: " + doc.getDateline());
+            }
             for (AgigaSentence sent : doc.getSents()) {
                 printAllSentenceAnnotations(writer, sent);
             }
